@@ -1,0 +1,175 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'sagemaker-image-classification
+
+  A SAR application for batch processing images in Amazon S3 against an Amazon SageMaker
+  model endpoint.
+
+  '
+Parameters:
+  ModelEndpointName:
+    Type: String
+    Default: ''
+    Description: (Required) Provide the name of the Amazon SageMaker model endpoint.
+  EmailAddress:
+    Type: String
+    Default: ''
+    Description: (Required) The email address to notify on detected defect.
+  BucketName:
+    Type: String
+    Default: ''
+    Description: (Required) The name of the bucket where your images will be added.
+Resources:
+  GetImageInfoFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+    - ImageQueue
+    Properties:
+      CodeUri: s3://iot-test-mo/b699939a7e20fca7d7288ccdf398b626
+      Handler: GetImageInfo.lambda_handler
+      Runtime: python3.7
+      Policies:
+      - StepFunctionsExecutionPolicy:
+          StateMachineName:
+            Fn::GetAtt:
+            - StateMachine
+            - Name
+      Environment:
+        Variables:
+          STATE_MACHINE:
+            Ref: StateMachine
+      Events:
+        MySQSEvent:
+          Type: SQS
+          Properties:
+            Queue:
+              Fn::GetAtt:
+              - ImageQueue
+              - Arn
+            BatchSize: 1
+  ClassifyImageFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+    - ImageQueue
+    Properties:
+      CodeUri: s3://iot-test-mo/b699939a7e20fca7d7288ccdf398b626
+      Handler: ClassifyImage.lambda_handler
+      Runtime: python3.7
+      Policies:
+      - S3ReadPolicy:
+          BucketName:
+            Ref: BucketName
+      - Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - sagemaker:InvokeEndpoint
+          Resource: '*'
+      Environment:
+        Variables:
+          ENDPOINT_NAME:
+            Ref: ModelEndpointName
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      DefinitionString:
+        Fn::Sub: "{\n  \"Comment\": \"Defect detection state machine\",\n  \"StartAt\"\
+          : \"ClassifyImage\",\n  \"States\": {\n    \"ClassifyImage\": {\n      \"\
+          Type\": \"Task\",\n      \"Resource\": \"arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ClassifyImageFunction}\"\
+          ,\n      \"Next\": \"CheckClass\",\n      \"TimeoutSeconds\": 300\n    },\n\
+          \    \"CheckClass\": {\n      \"Type\" : \"Choice\",\n      \"Choices\"\
+          : [\n        {\n          \"Variable\": \"$.detected_class\",\n        \
+          \  \"StringEquals\": \"defect_free\",\n          \"Next\": \"LogNoDefect\"\
+          \n        },\n        {\n          \"Variable\": \"$.detected_class\",\n\
+          \          \"StringEquals\": \"defective\",\n          \"Next\": \"SendDefectAlert\"\
+          \n        }\n      ],\n      \"Default\": \"DefaultState\"\n    },\n   \
+          \ \"SendDefectAlert\": {\n      \"Type\": \"Task\",\n      \"Resource\"\
+          : \"arn:aws:states:::sns:publish\",\n      \"Parameters\": {\n        \"\
+          TopicArn\": \"${DefectTopic}\",\n        \"Subject\": \"Defect Detected\"\
+          ,\n        \"Message.$\": \"$.message\"\n      },\n      \"End\": true\n\
+          \    },\n    \"LogNoDefect\": {\n      \"Type\": \"Task\",\n      \"Resource\"\
+          : \"arn:aws:states:::dynamodb:putItem\",\n      \"Parameters\": {\n    \
+          \    \"TableName\": \"${DefectFreeTable}\",\n        \"Item\": {\n     \
+          \     \"id.$\": \"$$.Execution.StartTime\",\n          \"key.$\": \"$.key\"\
+          ,\n          \"bucket.$\": \"$.bucket\",\n          \"score.$\": \"$.score\"\
+          \n        }\n      },\n      \"ResultPath\": \"$.DynamoDB\",\n      \"End\"\
+          : true\n    },\n    \"DefaultState\": {\n      \"Type\": \"Fail\",\n   \
+          \   \"Error\": \"DefaultStateError\",\n      \"Cause\": \"No Matches!\"\n\
+          \    }\n  }\n}"
+      RoleArn:
+        Fn::GetAtt:
+        - StatesExecutionRole
+        - Arn
+  StatesExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - Fn::Sub: states.${AWS::Region}.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: StatesExecutionPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:InvokeFunction
+            Resource:
+              Fn::GetAtt:
+              - ClassifyImageFunction
+              - Arn
+          - Effect: Allow
+            Action:
+            - sns:Publish
+            Resource:
+              Ref: DefectTopic
+          - Effect: Allow
+            Action:
+            - dynamodb:PutItem
+            Resource:
+              Fn::GetAtt:
+              - DefectFreeTable
+              - Arn
+  ImageQueue:
+    Type: AWS::SQS::Queue
+  ImageQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    DependsOn:
+    - ImageQueue
+    Properties:
+      Queues:
+      - Ref: ImageQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            AWS: '*'
+          Action: SQS:SendMessage
+          Resource:
+            Fn::GetAtt:
+            - ImageQueue
+            - Arn
+          Condition:
+            ArnEquals:
+              aws:SourceArn:
+                Fn::Sub: arn:aws:s3:::${BucketName}
+  DefectTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: defectTopic
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint:
+        Ref: EmailAddress
+      Protocol: email
+      TopicArn:
+        Ref: DefectTopic
+  DefectFreeTable:
+    Type: AWS::Serverless::SimpleTable
