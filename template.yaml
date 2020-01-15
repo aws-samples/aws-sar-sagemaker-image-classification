@@ -173,7 +173,7 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              AWS: '*'
+              AWS: !Ref AWS::AccountId
             Action: 'SQS:SendMessage'
             Resource: !GetAtt ImageQueue.Arn
             Condition:
