@@ -2,6 +2,7 @@
 
 A SAR application for batch processing images in Amazon S3 against an Amazon SageMaker model endpoint.
 
+![architecture diagram](https://d2908q01vomqb2.cloudfront.net/1b6453892473a467d07372d45eb05abc2031647a/2020/01/14/Picture1-1.png)
 
 ```bash
 .
